@@ -1,0 +1,52 @@
+node_modules/
+playwright-report/
+test-results/
+.auth/
+.env
+dist/
+*.log
+@"
+# Node modules
+node_modules/
+
+# Package manager files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build folders
+dist/
+build/
+out/
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
+
+# Allure Reports
+allure-results/
+allure-report/
+
+# Environment files
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# IDE files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+
+# TypeScript
+*.tsbuildinfo
+"@ | Set-Content .gitignore

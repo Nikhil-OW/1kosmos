@@ -1,0 +1,28 @@
+{
+  "name": "kosmos-playwright-framework",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reusable Playwright framework for multi-tenant authentication journey validation.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:auth": "playwright test tests/auth",
+    "test:tenant": "playwright test --project=chromium",
+    "report": "playwright show-report",
+    "typecheck": "tsc --noEmit",
+    "allure:serve": "allure serve allure-results",
+    "allure:generate": "allure generate allure-results -o allure-report --clean",
+    "allure:open": "npm run allure:generate && allure open allure-report",
+    "test:allure": "npx playwright test && npm run allure:open"
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^10.4.0",
+    "@playwright/test": "^1.54.0",
+    "@types/node": "^24.0.0",
+    "allure-commandline": "^2.40.0",
+    "allure-playwright": "^3.8.0",
+    "dotenv": "^16.4.5",
+    "typescript": "^5.8.0"
+  }
+}

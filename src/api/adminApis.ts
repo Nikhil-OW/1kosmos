@@ -1,0 +1,1092 @@
+import { APIRequestContext } from '@playwright/test';
+import { HttpClients } from './httpClients';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import { Logger } from '@utils/logger';
+import crypto from 'crypto';
+import { DataGenerator } from '@utils/dataGenerator';
+
+export interface CommunityAuthInfoResponse {
+    tenantId: string;
+    communityId: string;
+    [key: string]: unknown;
+}
+
+export interface EncryptedAdminAuthPayloads {
+    encRequestId: string;
+    encLicenseKey: string;
+    encPayload: string;
+}
+
+export class AdminApis {
+    constructor(
+        private readonly request: APIRequestContext,
+        private readonly config: RuntimeConfig
+    ) { }
+
+    async encryptOrDecryptUsingCaas(data: any, servicePublicKey: string, privateKey: string, action: 'encrypt' | 'decrypt' = 'encrypt'): Promise<any> {
+        const endPoint = `${this.config.caasUrl}/ecdsa_helper/${action}`.replace(/([^:]\/)\/+/g, "$1");
+        const payload = {
+            dataStr: action === 'encrypt' ? (typeof data === 'string' ? data : JSON.stringify(data)) : data,
+            publicKey: servicePublicKey,
+            privateKey: privateKey
+        };
+
+        const client = new HttpClients(this.request);
+        const response = await client.post<any>(endPoint, payload);
+
+        if (response.status !== 200) {
+            throw new Error(`${action.toUpperCase()} failed with status ${response.status}: ${response.data?.message || 'Unknown error'}`);
+        }
+
+        const result = response.data.data;
+
+        if (action === 'decrypt') {
+            try {
+                return typeof result === 'string' ? JSON.parse(result) : result;
+            } catch (e) {
+                return result;
+            }
+        }
+        return result;
+    }
+
+    async generateRequestId(): Promise<any> {
+        return {
+            ts: Math.floor(Date.now() / 1000),
+            appid: "playwright-automation",
+            uuid: crypto.randomUUID()
+        };
+    }
+
+    async fetchServicePublicKeyUsingAdminApi(tag?: string): Promise<string | undefined> {
+        try {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (tag) headers["X-TenantTag"] = tag;
+
+            const keyUrl = `${this.config.adminApiUrl}/publickeys`.replace(/([^:]\/)\/+/g, "$1");
+            Logger.log('INFO', 'SUCCESS', `Generating request to fetch service public key from Admin API at ${keyUrl}`);
+            const response = await this.request.get(keyUrl, { headers });
+
+            if (!response.ok()) {
+                Logger.log('ERROR', 'SERVICE', `❌ Failed to fetch server public key: ${response.status()}`);
+                return undefined;
+            }
+
+            const result = await response.json();
+            return result.publicKey;
+        } catch (error) {
+            Logger.log('ERROR', 'SERVICE', `❌ Error fetching server public key: ${error}`);
+            return undefined;
+        }
+    }
+
+    async communityAuthInfo(dns: string, communityName: string): Promise<CommunityAuthInfoResponse> {
+        const endpoint = `${this.config.adminApiUrl}/community_auth_info/fetch`.replace(/([^:]\/)\/+/g, "$1");
+
+        const privateKey = this.config.privateKey;
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
+        if (!servicePublicKey) throw new Error("FAILED: Service public key missing.");
+
+        const rawRequestId = await this.generateRequestId();
+        const payload = { dns, communityName };
+
+        const [enc_request_id, enc_data] = await Promise.all([
+            this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey),
+            this.encryptOrDecryptUsingCaas(payload, servicePublicKey, privateKey)
+        ]);
+
+        const client = new HttpClients(this.request, {
+            'Content-Type': 'application/json',
+            'publickey': this.config.publicKey,
+            'requestid': enc_request_id
+        });
+
+        Logger.log('API', `FETCH_AUTH_INFO -> DNS: ${dns} | Community: ${communityName}`);
+
+        try {
+            const response = await client.post<any>(endpoint, { data: enc_data });
+
+            if (response.status !== 200) {
+                throw new Error(`AdminAPI Error ${response.status}: ${JSON.stringify(response.data)}`);
+            }
+
+            const decryptedJson = await this.encryptOrDecryptUsingCaas(response.data.data, servicePublicKey, privateKey, 'decrypt');
+            const tenantId = decryptedJson.tenant?.id;
+            const communityId = decryptedJson.community?.id;
+
+            if (!tenantId || !communityId) {
+                throw new Error("IDs missing in decrypted response structure.");
+            }
+
+            this.config.tenantId = tenantId;
+            this.config.communityId = communityId;
+            Logger.log('SUCCESS', `Global Config Updated | Tenant: ${tenantId} | Community: ${communityId}`);
+
+            return { tenantId, communityId };
+
+        } catch (err: any) {
+            Logger.log('ERROR', `communityAuthInfo Failed: ${err.message}`);
+            throw err;
+        }
+    }
+
+    async generateAndCaptureOtp(username: string, previousOtp?: string): Promise<string> {
+        const servicePublicKey = await this.fetchAdminConsoleServicePublicKey();
+        if (!servicePublicKey) {
+            throw new Error("FAILED: Service public key missing for OTP generation.");
+        }
+
+        const clientLicense = this.config.licenseKey;
+        const privateKey = this.config.privateKey;
+        const rawRequestId = await this.generateRequestId();
+
+        const [encRequestId, encLicenseKey] = await Promise.all([
+            this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+            this.encryptOrDecryptUsingCaas(clientLicense, servicePublicKey, privateKey, 'encrypt')
+        ]);
+
+        const endpoint = `https://${this.config.dns}/api/r2/otp/generate`.replace(/([^:]\/)\/+/g, "$1");
+
+        const client = new HttpClients(this.request, {
+            'Content-Type': 'application/json',
+            'publickey': this.config.publicKey,
+            'requestid': encRequestId,
+            'licensekey': encLicenseKey
+        });
+
+        const requestBody = {
+            userId: username,
+            isCycleTimeRequired: true,
+            communityId: this.config.communityId,
+            tenantId: this.config.tenantId,
+            trace: true
+        };
+
+        Logger.log('API', `GENERATE_OTP -> User: ${username} | Tenant: ${this.config.tenantId}`);
+
+        try {
+            const response = await client.post<any>(endpoint, requestBody);
+
+            if (response.status === 429) {
+                const backoff = response.data?.retryAfterSeconds || 5;
+                Logger.log('ERROR', `OTP_RATE_LIMIT -> Sleeping for fallback period: ${backoff}s`);
+                await new Promise(resolve => setTimeout(resolve, backoff * 1000));
+                return this.generateAndCaptureOtp(username, previousOtp);
+            }
+
+            if (response.status !== 202 && response.status !== 200) {
+                throw new Error(`OTP API Error ${response.status}: ${JSON.stringify(response.data)}`);
+            }
+
+            const encryptedEnvelope = response.data?.data;
+            if (!encryptedEnvelope) {
+                throw new Error("Response envelope missing target 'data' signature block.");
+            }
+
+            const decryptedResponse = await this.encryptOrDecryptUsingCaas(encryptedEnvelope, servicePublicKey, privateKey, 'decrypt');
+            const otpCode = decryptedResponse?.code;
+            const secondsRemaining = decryptedResponse?.secondsRemaining || 0;
+
+            if (!otpCode) {
+                throw new Error("OTP text code missing from decrypted service data stream.");
+            }
+
+            if (previousOtp && otpCode === previousOtp && secondsRemaining > 0) {
+                Logger.log('WARN', `Interceptors picked up an identical active OTP: ${otpCode}. Waiting ${secondsRemaining}s before recycling generation steps.`);
+                await new Promise(resolve => setTimeout(resolve, secondsRemaining * 1000));
+                return this.generateAndCaptureOtp(username, previousOtp);
+            }
+
+            Logger.log('SUCCESS', `OTP Intercepted Successfully: ${otpCode} (Valid for ${secondsRemaining}s)`);
+            return otpCode;
+
+        } catch (err: any) {
+            Logger.log('ERROR', `generate And Capture Otp Operation Flow Failure: ${err.message}`);
+            throw err;
+        }
+    }
+
+    async prepareAdminAuthEncryptedPayloadsAndKeys(username: string, userPassword?: string): Promise<EncryptedAdminAuthPayloads> {
+        Logger.log('INFO', 'SUCCESS', `Starting encryption setup for User: ${username}`);
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
+        if (!servicePublicKey) {
+            throw new Error("FAILED: Service public key missing for admin authentication setup.");
+        }
+
+        const rawRequestId = await this.generateRequestId();
+        const clientLicense = this.config.licenseKey;
+        const privateKey = this.config.privateKey;
+
+        const authPayload = {
+            tenantId: this.config.tenantId,
+            communityId: this.config.communityId,
+            username: username,
+            password: userPassword || "1Kosmos123$"
+        };
+
+        try {
+            const [encRequestId, encLicenseKey, encPayload] = await Promise.all([
+                this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(clientLicense, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(authPayload, servicePublicKey, privateKey, 'encrypt')
+            ]);
+
+            Logger.log('SUCCESS', `Successfully encrypted requestId, license key, and authentication payload.`);
+
+            return {
+                encRequestId,
+                encLicenseKey,
+                encPayload
+            };
+
+        } catch (error: any) {
+            Logger.log('ERROR', `prepareAdminAuthPayloads failed executing CaaS cycles: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async authenticateWithPasswordForInitialJWT(username: string, userPassword?: string): Promise<{ jwt: string; refreshToken?: string }> {
+        const endpoint = `${this.config.adminApiUrl}/v2/request_access`;
+
+        Logger.log('API', `AUTH_PASSWORD -> User: ${username} | Tenant: ${this.config.tenantId}`);
+
+        const { encRequestId, encLicenseKey, encPayload } = await this.prepareAdminAuthEncryptedPayloadsAndKeys(username, userPassword);
+
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
+        if (!servicePublicKey) {
+            throw new Error("FAILED: Service public key missing for password authentication decryption.");
+        }
+
+        const client = new HttpClients(this.request, {
+            'Content-Type': 'application/json',
+            'publickey': this.config.publicKey,
+            'requestid': encRequestId,
+            'licensekey': encLicenseKey
+        });
+
+        try {
+            const response = await client.post<any>(endpoint, { data: encPayload });
+
+            if (response.status !== 200) {
+                throw new Error(`authenticateWithPasswordForInitialJWT Failed with status ${response.status}: ${JSON.stringify(response.data)}`);
+            }
+
+            const encryptedDataResponse = response.data?.data;
+            if (!encryptedDataResponse) {
+                throw new Error("Invalid payload structure: data block missing in password auth response.");
+            }
+
+            const privateKey = this.config.privateKey;
+            Logger.log('INFO', 'SUCCESS', `Decrypting Phase 1 tokens via CaaS...`);
+            const decryptedResponse = await this.encryptOrDecryptUsingCaas(encryptedDataResponse, servicePublicKey, privateKey, 'decrypt');
+
+            const jwt = decryptedResponse?.jwt;
+            const refreshToken = decryptedResponse?.refreshToken;
+
+            if (!jwt) {
+                throw new Error("Failed to extract initial JWT from decrypted password auth payload.");
+            }
+
+            Logger.log('SUCCESS', `Phase 1 Authentication Successful. Initial JWT obtained.`);
+
+            return { jwt, refreshToken };
+
+        } catch (err: any) {
+            Logger.log('ERROR', `authenticateWithPasswordForInitialJWT Execution Failed: ${err.message}`);
+            throw err;
+        }
+    }
+
+    async fetchAdminConsoleServicePublicKey(tag?: string): Promise<string | undefined> {
+        try {
+            const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+                "X-TenantTag": this.config.clientTenantTag || "1kosmos"
+            };
+            const keyUrl = `https://${this.config.dns}/api/r1/community/${this.config.communityName}/publickeys`.replace(/([^:]\/)\/+/g, "$1");
+
+            Logger.log('INFO', 'SUCCESS', `Generating request to fetch console service public key at ${keyUrl}`);
+            const response = await this.request.get(keyUrl, { headers });
+
+            if (!response.ok()) {
+                const errorText = await response.text();
+                Logger.log('ERROR', 'SERVICE', `❌ Failed to fetch OTP server public key: ${response.status()} - ${errorText}`);
+                return undefined;
+            }
+
+            const result = await response.json();
+            return result.publicKey;
+        } catch (error) {
+            Logger.log('ERROR', 'SERVICE', `❌ Error fetching OTP server public key: ${error}`);
+            return undefined;
+        }
+    }
+
+    async authenticateJwtWithOtp(username: string, initialJwt: string, otp: string): Promise<string> {
+        const endpoint = `${this.config.adminApiUrl}/v2/request_access`;
+        Logger.log('API', 'STEP', `Finalizing authentication for user: ${username}`);
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
+        if (!servicePublicKey) {
+            throw new Error("FAILED: Service public key missing for final authentication step.");
+        }
+
+        const rawRequestId = await this.generateRequestId();
+        const clientLicense = this.config.licenseKey;
+        const privateKey = this.config.privateKey;
+
+        const otpPayload = {
+            tenantId: this.config.tenantId,
+            communityId: this.config.communityId,
+            username: String(username),
+            web_otp: otp
+        };
+
+        try {
+            const [encRequestId, encLicenseKey, encPayload, encJwt] = await Promise.all([
+                this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(clientLicense, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(otpPayload, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(initialJwt, servicePublicKey, privateKey, 'encrypt')
+            ]);
+
+            const client = new HttpClients(this.request, {
+                'Content-Type': 'application/json',
+                'publickey': this.config.publicKey,
+                'requestid': encRequestId,
+                'licensekey': encLicenseKey,
+                'Authorization': `Bearer ${encJwt}`
+            });
+
+            const response = await client.post<any>(endpoint, { data: encPayload });
+
+            if (response.status !== 200) {
+                throw new Error(`authenticateJwtWithOtp Failed [${response.status}]: ${JSON.stringify(response.data)}`);
+            }
+
+            const encryptedData = response.data?.data;
+            if (!encryptedData) {
+                throw new Error("Data block missing in final authentication response.");
+            }
+
+            Logger.log('INFO', 'SUCCESS', `Decrypting final authenticated JWT...`);
+            const decrypted = await this.encryptOrDecryptUsingCaas(encryptedData, servicePublicKey, privateKey, 'decrypt');
+
+            const finalJwt = decrypted?.jwt;
+            if (!finalJwt) {
+                throw new Error("Final authenticated JWT could not be extracted from decrypted response.");
+            }
+
+            Logger.log('SUCCESS', `Authentication complete! Final JWT obtained.`);
+            return finalJwt;
+
+        } catch (err: any) {
+            Logger.log('ERROR', 'API', `authenticateJwtWithOtp Execution Failed: ${err.message}`);
+            throw err;
+        }
+    }
+
+    async createAccessCode(): Promise<string> {
+        Logger.log('API', 'STEP', 'Starting encryption setup for access code generation.');
+
+        const endpoint = `https://${this.config.dns}/api/r2/acr/community/${this.config.communityName}/code`;
+
+        const servicePublicKey = await this.fetchAdminConsoleServicePublicKey();
+        if (!servicePublicKey) {
+            throw new Error("FAILED: Service public key missing for final authentication step.");
+        }
+
+        const rawRequestId = await this.generateRequestId();
+        const clientLicense = this.config.licenseKey;
+        const privateKey = this.config.privateKey;
+
+        const accessCodePayload = {
+            userId: this.config.userUsername,
+            firstname: this.config.userFirstname || '',
+            lastname: this.config.userLastname || '',
+            emailTo: this.config.userEmail || '',
+            smsTo: this.config.userEmail || '',
+            uid: this.config.userUid,
+            createdby: 'cadmin',
+            createdbyemail: 'nikhil_yop@yopmail.com',
+            authModuleId: this.config.userModuleId,
+            dns: this.config.dns
+        };
+
+        try {
+            const [encRequestId, encLicenseKey, encPayload] = await Promise.all([
+                this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(clientLicense, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(accessCodePayload, servicePublicKey, privateKey, 'encrypt')
+            ]);
+
+            Logger.log('SUCCESS', 'Successfully generated encrypted request credentials for access code creation.');
+
+            const client = new HttpClients(this.request, {
+                'Content-Type': 'application/json',
+                'publickey': this.config.publicKey,
+                'requestid': encRequestId,
+                'licensekey': encLicenseKey,
+                'X-TenantTag': this.config.clientTenantTag
+            });
+
+            const response = await client.put<any>(endpoint, { data: encPayload });
+
+            if (response.status !== 200 && response.status !== 201) {
+                throw new Error(`Access Code API call returned invalid status [${response.status}]: ${JSON.stringify(response.data)}`);
+            }
+
+            const jsonData = response.data;
+            const actualData = jsonData.data ? jsonData.data : jsonData;
+
+            if (!actualData || !actualData.code) {
+                throw new Error(`Access Code text missing from response body. Received: ${JSON.stringify(jsonData)}`);
+            }
+
+            const accessCode = actualData.code;
+            this.config.accessCode = accessCode;
+            Logger.log('SUCCESS', `Access code created: ${accessCode}`);
+            return accessCode;
+        } catch (error: any) {
+            Logger.log('ERROR', 'API', `prepareAccessCode workflow cycle failed: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async redeemAccessCode(username: string, accessCode: string): Promise<any> {
+        const endpoint = `https://${this.config.dns}/api/r1/acr/community/${this.config.communityName}/${accessCode}/redeem`;
+
+        const device = DataGenerator.getVirtualDeviceDetails();
+
+        Logger.log('API', 'STEP', `Redeeming Access Code: ${accessCode} for Device: ${device.did}`);
+
+        const servicePublicKey = await this.fetchAdminConsoleServicePublicKey();
+        if (!servicePublicKey)
+            throw new Error("FAILED: Admin Console service public key missing.");
+
+        const rawRequestId = await this.generateRequestId();
+        const clientLicense = this.config.licenseKey;
+        const privateKey = this.config.privateKey;
+
+        const redeemPayload = {
+            code: accessCode,
+            userPublicKey: device.publicKey,
+            password: '',
+            userId: username
+        };
+
+        const eventData = {
+            authenticator_id: 'com.onekosmos.kernel.blockid',
+            authenticator_name: 'BlockID',
+            authenticator_os: 'iOS',
+            authenticator_version: '1.10.93.67AC471E',
+            device_id: device.device_id,
+            device_make: device.device_name,
+            device_model: device.device_name,
+            device_name: device.device_name,
+            license_hash: '485a4592896616e3f422a7ded89a3e381f6ad2943f3302571a53282ef14c6ff7',
+            os: 'iOS',
+            os_version: '17',
+            person_ial: 'IAL1',
+            person_id: device.did,
+            person_publickey: device.publicKey,
+            user_agent: 'Playwright Automation',
+            user_ial: '',
+            user_lat: '0.0',
+            user_lon: '0.0'
+        };
+
+        try {
+            const [encReqId, encLicense, encData, encEvent] = await Promise.all([
+                this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(clientLicense, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(redeemPayload, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(eventData, servicePublicKey, privateKey, 'encrypt')
+            ]);
+
+            const client = new HttpClients(this.request, {
+                'Content-Type': 'application/json',
+                'publickey': this.config.publicKey,
+                'requestid': encReqId,
+                'licensekey': encLicense,
+                'X-TenantTag': this.config.clientTenantTag
+            });
+
+            const requestBody = {
+                data: encData,
+                eventData: encEvent,
+                did: device.did,
+                os: "ios",
+                provider: "apple",
+                pushid: device.pushId || '',
+                ial: "IAL1"
+            };
+
+            const response = await client.post<any>(endpoint, requestBody);
+            if (response.status !== 200) {
+                throw new Error(`Redeem Access Code failed [${response.status}]: ${JSON.stringify(response.data)}`);
+            }
+
+            Logger.log('SUCCESS', 'Device linked successfully via access code redeem');
+            return response.data;
+
+        } catch (err: any) {
+            Logger.log('ERROR', 'API', `redeemAccessCode failed: ${err.message}`);
+            throw err;
+        }
+    }
+
+    async createAuthenticationSession(username: string, authMode: 'push' | 'qr'): Promise<string> {
+        const jwt = this.authenticateWithPasswordForInitialJWT(username);
+        const endpoint = `${this.config.adminApiUrl}/session/new`;
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
+
+        if (!servicePublicKey) {
+            throw new Error("FAILED: Service public key missing for authentication step.");
+        }
+
+        Logger.log('API', 'STEP', `Starting ${authMode.toUpperCase()} session creation pipeline.`);
+
+        const rawRequestId = await this.generateRequestId();
+        const clientLicense = this.config.licenseKey;
+        const privateKey = this.config.privateKey;
+
+        const payload = {
+            tenantId: this.config.tenantId,
+            communityId: this.config.communityId,
+            tag: this.config.clientTenantTag || this.config.communityName,
+            url: `https://${this.config.dns}`,
+            communityName: this.config.communityName,
+            authPage: 'blockid://authenticate',
+            scopes: 'firstname,lastname,device_info,location',
+            authtype: 'Fingerprint/Face',
+            metadata: {
+                authVia: `${authMode}`,
+                purpose: 'authentication',
+                username: `${username}`
+            }
+        };
+
+        try {
+            const [encRequestId, encLicenseKey, encJWT, encPayload] = await Promise.all([
+                this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(clientLicense, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(jwt, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(payload, servicePublicKey, privateKey, 'encrypt')
+            ]);
+
+            Logger.log('SUCCESS', `Successfully encrypted request credentials for ${authMode} session.`);
+
+            const client = new HttpClients(this.request, {
+                'Content-Type': 'application/json',
+                'publickey': this.config.publicKey,
+                'requestid': encRequestId,
+                'licensekey': encLicenseKey,
+                'Authorization': `Bearer ${encJWT}`
+            });
+
+            const response = await client.put<any>(endpoint, { data: encPayload });
+
+            if (response.status !== 200 && response.status !== 201) {
+                throw new Error(`${authMode.toUpperCase()} Session API returned status [${response.status}]: ${JSON.stringify(response.data)}`);
+            }
+
+            const responseData = response.data;
+            let decryptedData: any = null;
+
+            if (responseData && responseData.data) {
+                const decryptionResult = await this.encryptOrDecryptUsingCaas(responseData.data, servicePublicKey, privateKey, 'decrypt');
+                decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
+            } else {
+                decryptedData = responseData;
+            }
+
+            if (!decryptedData || (!decryptedData.sessionId && !responseData.sessionId)) {
+                throw new Error(`Session metadata properties missing from response. Received: ${JSON.stringify(responseData)}`);
+            }
+
+            const sessionId = decryptedData.sessionId || responseData.sessionId || '';
+            const sessionUrl = decryptedData.sessionUrl || responseData.sessionUrl || '';
+            const sessionPublicKey = decryptedData.publicKey || responseData.publicKey || servicePublicKey;
+
+            this.config.sessionId = sessionId;
+            this.config.sessionUrl = sessionUrl;
+            this.config.sessionPublicKey = sessionPublicKey;
+
+            Logger.log('SUCCESS', `${authMode.toUpperCase()} session created. ID: ${sessionId}`);
+            return sessionId;
+
+        } catch (error: any) {
+            Logger.log('ERROR', 'API', `createAuthSession workflow failed for ${authMode}: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async authenticateSession(username: string, authMode: 'push' | 'qr' = 'push'): Promise<any> {
+        Logger.log('API', 'STEP', `Starting ${authMode} session authentication setup.`);
+
+        const device = DataGenerator.getVirtualDeviceDetails() || this.config.device1;
+        if (!device) {
+            throw new Error("ERROR: Valid device properties not found in execution context.");
+        }
+
+        this.config.deviceDid = device.did;
+        this.config.devicePublicKey = device.publicKey;
+
+        const sessionPublicKey = this.config.sessionPublicKey;
+        const sessionId = this.config.sessionId;
+
+        if (!sessionId || !sessionPublicKey) {
+            throw new Error("FAILED: Active sessionId or sessionPublicKey missing from context configuration.");
+        }
+
+        const endpoint = `https://${this.config.dns}/sessions/session/${sessionId}/authenticate`;
+
+        const authPayload = {
+            userid: `${username}`,
+            account: {
+                authModuleId: this.config.userModuleId,
+                communityId: this.config.communityId,
+                tenantId: this.config.tenantId,
+                source: 'athena',
+                username: `${username}`,
+                uid: this.config.userUid,
+                dguid: this.config.userDguid || '',
+                urn: this.config.userUrn || ''
+            },
+            location: { lat: 17.53286, lon: 78.2979741 },
+            device_info: {
+                device_name: device.device_name,
+                device_os: '13',
+                deviceid: device.device_id,
+                user_agent: `Playwright ${authMode === 'push' ? 'Push' : 'QR'} Automation`
+            },
+            did: device.did
+        };
+
+        const eventData = {
+            authenticator_id: 'com.onekosmos.kernel.blockid',
+            authenticator_name: 'BlockID',
+            authenticator_os: device.os || 'ios',
+            authenticator_version: '1.10.93.67AC471E',
+            device_id: device.device_id,
+            device_name: device.device_name,
+            license_hash: '485a4592896616e3f422a7ded89a3e381f6ad2943f3302571a53282ef14c6ff7',
+            person_ial: 'IAL1',
+            person_id: device.did,
+            person_publickey: device.publicKey,
+            user_agent: `Playwright ${authMode === 'push' ? 'Push' : 'QR'} Automation`,
+            user_ial: '',
+            user_lat: '17.5323605',
+            user_lon: '78.3020806'
+        };
+
+        try {
+            Logger.log('API', 'INFO', `Encrypting ${authMode} authentication payloads...`);
+
+            const [encAuthPayload, encEventData] = await Promise.all([
+                this.encryptOrDecryptUsingCaas(authPayload, sessionPublicKey, device.privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(eventData, sessionPublicKey, device.privateKey, 'encrypt')
+            ]);
+
+            const finalRequestPayload = {
+                data: encAuthPayload,
+                eventData: encEventData,
+                did: device.did,
+                publicKey: device.publicKey,
+                ial: 'IAL1',
+                lat: '17.532372',
+                lon: '78.3020333',
+                appid: 'com.onekosmos.kernel.blockid'
+            };
+
+            const client = new HttpClients(this.request, {
+                'Content-Type': 'application/json',
+                'X-TenantTag': this.config.clientTenantTag || ''
+            });
+
+            const response = await client.post<any>(endpoint, finalRequestPayload);
+
+            if (response.status !== 200 && response.status !== 201) {
+                throw new Error(`${authMode.toUpperCase()} Authentication API call returned invalid status [${response.status}]: ${JSON.stringify(response.data)}`);
+            }
+
+            const jsonData = response.data;
+            const actualData = jsonData.data ? jsonData.data : jsonData;
+
+            Logger.log('SUCCESS', `${authMode.toUpperCase()} session successfully authenticated. Response ID: ${actualData.id || actualData.sessionId}`);
+            return actualData;
+
+        } catch (error: any) {
+            Logger.log('ERROR', 'API', `authenticateSession workflow cycle aborted for ${authMode}: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async pollRequestAccess(maxAttempts = 10, initialJwt: string): Promise<string> {
+        Logger.log('API', 'STEP', 'Starting request access polling workflow loop.');
+
+        let baseUrl = this.config.adminApiUrl;
+        const endpoint = `${baseUrl}/v2/request_access`;
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
+
+        const privateKey = this.config.privateKey;
+        const rawRequestId = await this.generateRequestId();
+
+        if (!servicePublicKey || !privateKey) {
+            throw new Error("FAILED: Required keys (servicePublicKey or privateKey) missing from context config.");
+        }
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const waitMs = attempt === 1 ? 3000 : 2000;
+            Logger.log('API', 'INFO', `Poll attempt ${attempt}/${maxAttempts} - sleeping for ${waitMs}ms...`);
+            await new Promise(resolve => setTimeout(resolve, waitMs));
+
+            const accessPayload = {
+                tenantId: this.config.tenantId,
+                communityId: this.config.communityId,
+                uwlSessionId: this.config.sessionId
+            };
+
+            try {
+                const [encRequestId, encLicenseKey, encPayload, encJWT] = await Promise.all([
+                    this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+                    this.encryptOrDecryptUsingCaas(this.config.licenseKey, servicePublicKey, privateKey, 'encrypt'),
+                    this.encryptOrDecryptUsingCaas(accessPayload, servicePublicKey, privateKey, 'encrypt'),
+                    this.encryptOrDecryptUsingCaas(initialJwt, servicePublicKey, privateKey, 'encrypt')
+                ]);
+
+                const client = new HttpClients(this.request, {
+                    'Content-Type': 'application/json',
+                    'publickey': this.config.publicKey,
+                    'requestid': encRequestId,
+                    'licensekey': encLicenseKey,
+                    'Authorization': `Bearer ${encJWT}`
+                });
+
+                const response = await client.post<any>(endpoint, { data: encPayload });
+                const responseData = response.data;
+
+                if (response.status === 500 || (responseData && responseData.code === 500) || responseData?.recommendation === 'continue polling') {
+                    Logger.log('API', 'WARN', `Session processing or not ready yet on attempt ${attempt}/10. Status: 500. Retrying next cycle...`);
+                    continue;
+                }
+
+                if (response.status !== 200 && response.status !== 201) {
+                    throw new Error(`Unexpected endpoint response status [${response.status}]: ${JSON.stringify(responseData)}`);
+                }
+
+                let decryptedData: any = null;
+                if (responseData && responseData.data) {
+                    Logger.log('API', 'INFO', 'Encrypted data detected in polling payload. Invoking decryption...');
+                    const decryptionResult = await this.encryptOrDecryptUsingCaas(responseData.data, servicePublicKey, privateKey, 'decrypt');
+                    decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
+                } else {
+                    decryptedData = responseData;
+                }
+
+                const authenticatedJwt = decryptedData?.jwt || decryptedData?.access_token || decryptedData?.data?.jwt;
+                if (!authenticatedJwt) {
+                    throw new Error(`Target token fields missing from decrypted payload context: ${JSON.stringify(decryptedData)}`);
+                }
+
+                this.config.authenticatedJwt = authenticatedJwt;
+                Logger.log('SUCCESS', 'Push Authentication complete! Final authenticated JWT captured.');
+                return authenticatedJwt;
+
+            } catch (error: any) {
+                Logger.log('ERROR', 'API', `Polling pipeline exception thrown on attempt ${attempt}: ${error.message}`);
+                if (attempt === maxAttempts) throw error;
+            }
+        }
+        throw new Error(`Session authorization timeout context: Push authentication failed after ${maxAttempts} execution cycles.`);
+    }
+
+    async unlinkUserDevice(username: string, jwtToken: string): Promise<any> {
+        Logger.log('API', 'UNLINK', `Requesting authentication method login options unlink device for user: ${username}`);
+
+        const endpoint = `${this.config.adminApiUrl}/users/unlink_login_options`;
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
+
+        if (!servicePublicKey) {
+            throw new Error("FAILED: Service public key missing for authentication step.");
+        }
+
+        const rawRequestId = await this.generateRequestId();
+        const clientLicense = this.config.licenseKey; // Grab the structural license key from your config
+        const privateKey = this.config.privateKey;
+
+        const payload = {
+            "user": {
+                "uid": this.config.userUid,
+                "username": `${username}`,
+                "authModuleId": this.config.dbAuthModule
+            },
+            "community": {
+                "id": this.config.tenantId,
+                "name": this.config.communityName,
+                "publicKey": servicePublicKey
+            },
+            "did": this.config.deviceDid,
+            "unlink_user_pin": true,
+            "unlink_typingPhrase": true
+        };
+
+        try {
+            const [encRequestId, encLicenseKey, encPayload, encJwt] = await Promise.all([
+                this.encryptOrDecryptUsingCaas(rawRequestId, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(clientLicense, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(payload, servicePublicKey, privateKey, 'encrypt'),
+                this.encryptOrDecryptUsingCaas(jwtToken, servicePublicKey, privateKey, 'encrypt')
+            ]);
+
+            const client = new HttpClients(this.request, {
+                'Content-Type': 'application/json',
+                'requestid': encRequestId,
+                'publickey': this.config.publicKey,
+                'Authorization': `Bearer ${encJwt}`
+            });
+
+            const response = await client.patch<any>(endpoint, { data: encPayload });
+
+            if (response.status !== 200) {
+                Logger.log('ERROR', 'UNLINK_FAILED', `❌ Unlink failed with status ${response.status}`);
+                throw new Error(`Unlink user device pipeline thrown an exception. Status code: ${response.status}`);
+            }
+
+            const responseData = response.data;
+            Logger.log('SUCCESS', 'UNLINK_COMPLETE', `Server response verified: ${responseData.message}`);
+
+            return response;
+
+        } catch (error: any) {
+            Logger.log('ERROR', 'API', `❌ Unlink login option workflow failed for user ${username}: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async interceptAndApproveUiSession1(page: any, username: string, authMode: 'push' | 'qr'): Promise<string> {
+        console.log(`\n================================================================`);
+        console.log(`[DEBUG] 🚀 STARTING REPEATABLE FOR-LOOP INTERCEPTOR FOR PATH: /new`);
+        console.log(`================================================================`);
+
+        let interceptedResponse: any = null;
+
+        console.log(`[DEBUG] ⏳ Attaching live network tab traffic listener...`);
+        try {
+            interceptedResponse = await page.waitForResponse((response: any) => {
+                const url = response.url();
+                const method = response.request().method();
+                const status = response.status();
+
+                // MATCHES EXACT VALUE: /adminapi/sessions/session/new
+                const matchesUrl = url.includes('/adminapi/sessions/session/new');
+                const isPut = method === 'PUT';
+                const isSuccess = status === 200 || status === 201;
+
+                return matchesUrl && isPut && isSuccess;
+            }, { timeout: 30000 }); // Generous 30s window to capture the event
+
+        } catch (timeoutErr) {
+            console.log(`❌ [DEBUG TERMINAL TIMEOUT] No matching MFA challenge packet appeared on the wire.`);
+            throw new Error(`FAILED: Network listener timed out waiting for active /adminapi/sessions/session/new packet.`);
+        }
+
+        console.log(`[DEBUG] ✅ Network interceptor successfully isolated the live container!`);
+
+        // --- STEP 1: PRINT RAW RESPONSE PAYLOAD ---
+        const responseData = await interceptedResponse.json();
+        console.log(`\n----------------------------------------------------------------`);
+        console.log(`[DEBUG STEP 1] Raw API Response data block captured:`);
+        console.log(JSON.stringify(responseData, null, 2));
+        console.log(`----------------------------------------------------------------\n`);
+
+        // Extract and assign the response public key to sessionPublicKey
+        const sessionPublicKey = responseData?.publicKey || '';
+        this.config.sessionPublicKey = sessionPublicKey;
+
+        console.log(`[DEBUG] 🔑 Stored response public key into config: "${sessionPublicKey.substring(0, 30)}..."`);
+
+        const privateKey = this.config.privateKey;
+        let decryptedData: any = null;
+
+        // --- STEP 2: DECRYPT AND PRINT ---
+        if (responseData && responseData.data) {
+            console.log(`[DEBUG] 🔐 Passing active data string to CaaS for decryption using stored sessionPublicKey...`);
+            try {
+                const decryptionResult = await this.encryptOrDecryptUsingCaas(responseData.data, sessionPublicKey, privateKey, 'decrypt');
+                decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
+
+                console.log(`\n----------------------------------------------------------------`);
+                console.log(`[DEBUG STEP 2 SUCCESS] 📂 Decrypted Object payload structure content details:`);
+                console.log(JSON.stringify(decryptedData, null, 2));
+                console.log(`----------------------------------------------------------------\n`);
+            } catch (caasError: any) {
+                console.log(`[DEBUG] ❌ Decryption layer failure: ${caasError.message}`);
+                throw caasError;
+            }
+        } else {
+            console.log(`[DEBUG] ⚠️ Error: Response payload missing '.data' field. Cannot decrypt.`);
+        }
+
+        const sessionId = decryptedData?.sessionId || decryptedData?.id || responseData?.sessionId || '';
+        this.config.sessionId = sessionId;
+
+        return sessionId;
+    }
+
+    async interceptAndApproveUiSession(page: any, username: string, authMode: 'push' | 'qr'): Promise<string> {
+        console.log(`\n================================================================`);
+        console.log(`[DEBUG] 🚀 STARTING RESILIENT FOR-LOOP INTERCEPTOR VIA CLICK RETRIES`);
+        console.log(`================================================================`);
+
+        let interceptedResponse: any = null;
+        const maxAttempts = 5;
+        const sendPushLocator = page.locator(`//*[text()='Send push']`);
+
+        const cdpSession = await page.context().newCDPSession(page);
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            console.log(`[DEBUG] ⏳ Attempt ${attempt} of ${maxAttempts}: Monitoring network streams...`);
+
+            try {
+                if (attempt > 1) {
+                    console.log(`[DEBUG] 🧹 Flashing Browser Network Tab context logs for Attempt ${attempt}...`);
+                    try {
+                        await cdpSession.send('Network.clearBrowserCache');
+                        await cdpSession.send('Network.disable');
+                        await cdpSession.send('Network.enable');
+                    } catch (cdpErr: any) {
+                        console.log(`[DEBUG] ⚠️ Non-terminal CDP Network clear warning: ${cdpErr.message}`);
+                    }
+
+                    console.log(`[DEBUG] 📡 Re-requesting token stream. Triggering concurrent listener + click...`);
+
+                    const [_, response] = await Promise.all([
+                        sendPushLocator.click(),
+                        page.waitForResponse((response: any) => {
+                            const url = response.url();
+                            const method = response.request().method();
+                            const status = response.status();
+
+                            const matchesUrl = url.includes('/adminapi/sessions/session/new');
+                            const isPut = method === 'PUT';
+                            const isSuccess = status === 200 || status === 201;
+
+                            return matchesUrl && isPut && isSuccess;
+                        }, { timeout: 15000 })
+                    ]);
+
+                    interceptedResponse = response;
+                } else {
+                    interceptedResponse = await page.waitForResponse((response: any) => {
+                        const url = response.url();
+                        const method = response.request().method();
+                        const status = response.status();
+
+                        const matchesUrl = url.includes('/adminapi/sessions/session/new');
+                        const isPut = method === 'PUT';
+                        const isSuccess = status === 200 || status === 201;
+
+                        return matchesUrl && isPut && isSuccess;
+                    }, { timeout: 15000 });
+                }
+
+                if (interceptedResponse) {
+                    console.log(`[DEBUG] ✅ API displayed successfully at top layer of the Network tab on attempt ${attempt}!`);
+                    break;
+                }
+            } catch (timeoutErr) {
+                console.log(`[DEBUG] ⚠️ Attempt ${attempt} timed out. API did not clear backend thresholds.`);
+
+                if (attempt === maxAttempts) {
+                    await cdpSession.detach().catch(() => { });
+                    throw new Error(`FAILED: Network monitor timed out after maxing out all ${maxAttempts} 'Send push' click retry cycles.`);
+                }
+            }
+        }
+
+        await cdpSession.detach().catch(() => { });
+
+        console.log(`[DEBUG] ✅ Network interceptor successfully isolated the live container!`);
+
+        // --- STEP 1: READ JSON BODY ---
+        const responseData = await interceptedResponse.json();
+        console.log(`\n----------------------------------------------------------------`);
+        console.log(`[DEBUG STEP 1] Raw API Response data block captured at top layer:`);
+        console.log(JSON.stringify(responseData, null, 2));
+        console.log(`----------------------------------------------------------------\n`);
+
+        const sessionPublicKey = responseData?.publicKey || '';
+
+        // Fetch the structural service validation keys globally
+        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi().catch(() => null);
+
+        const privateKey = this.config.privateKey;
+        let decryptionResult: string | null = null;
+
+        // --- STEP 2: MULTI-KEY FALLBACK DECRYPTION MATRIX ---
+        if (responseData && responseData.data) {
+            console.log(`[DEBUG] 🔐 Initializing resilient cryptographic format routing for CaaS execution...`);
+
+            const variants = [
+                { name: "Raw Intercepted UI Base64 Key", key: sessionPublicKey },
+                {
+                    name: "Uncompressed Point Format (04 Byte Hex Prefix)",
+                    get key() {
+                        const rawBuffer = Buffer.from(sessionPublicKey, 'base64');
+                        if (rawBuffer.length === 64) {
+                            return Buffer.concat([Buffer.from([0x04]), rawBuffer]).toString('base64');
+                        }
+                        return sessionPublicKey;
+                    }
+                }
+            ];
+
+            // Dynamically insert global master service public key variation if available
+            if (servicePublicKey) {
+                variants.push({ name: "Global Service Public Key Master Mapping", key: servicePublicKey });
+            }
+
+            for (const variant of variants) {
+                console.log(`[DEBUG] ⚡ Trying decryption payload variant: [${variant.name}]`);
+                try {
+                    const res = await this.encryptOrDecryptUsingCaas(responseData.data, variant.key, privateKey, 'decrypt');
+                    if (res) {
+                        decryptionResult = res;
+                        console.log(`[DEBUG] 🎯 SUCCESS! Decryption cracked using variant: [${variant.name}]`);
+                        this.config.sessionPublicKey = variant.key;
+                        break;
+                    }
+                } catch (err: any) {
+                    console.log(`[DEBUG] ⚠️ Variant [${variant.name}] rejected by CaaS engine (Status 500 / Fault).`);
+                }
+            }
+
+            if (!decryptionResult) {
+                console.log(`\n❌ [CRITICAL PLATFORM FAULT] All cryptographic options exhausted.`);
+                console.log(`Check your test configuration setup where 'this.config.privateKey' is initialized.`);
+                throw new Error(`FAILED: CaaS gateway completely rejected decryption maps for payload.`);
+            }
+
+            let decryptedData: any = null;
+            try {
+                decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
+
+                console.log(`\n----------------------------------------------------------------`);
+                console.log(`[DEBUG STEP 2 SUCCESS] 📂 Decrypted Object payload structure content details:`);
+                console.log(JSON.stringify(decryptedData, null, 2));
+                console.log(`----------------------------------------------------------------\n`);
+            } catch (jsonErr: any) {
+                console.log(`[DEBUG] ❌ Crypto text unlocked, but stream is not standard JSON: ${decryptionResult}`);
+                throw jsonErr;
+            }
+
+            const sessionId = decryptedData?.sessionId || decryptedData?.id || responseData?.sessionId || '';
+            this.config.sessionId = sessionId;
+
+            return sessionId;
+        } else {
+            throw new Error("FAILED: Response payload missing '.data' field. Cannot decrypt.");
+        }
+    }
+}
