@@ -27,6 +27,10 @@ export const test = base.extend<AppFixtures>({
     const context = await browser.newContext({
       storageState: undefined,
       ignoreHTTPSErrors: true,
+      recordVideo: {
+        dir: 'test-results/videos/',
+        size: { width: 1280, height: 720 }
+      }
     });
     await use(context);
     await context.close();

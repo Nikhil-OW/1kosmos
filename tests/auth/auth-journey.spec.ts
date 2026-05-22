@@ -7,9 +7,7 @@ import { LoginPage } from '@pages/loginPage';
 import { UserMgmtApi } from '@api/userMgmtApi';
 import { DataGenerator } from '@utils/dataGenerator';
 import { Logger } from '@utils/logger';
-import { afterEach } from 'node:test';
 import { AdminApis } from '@api/adminApis';
-import { AnyARecord } from 'node:dns';
 
 type AuthJourneyFixtures = {
   page: Page;
@@ -61,10 +59,11 @@ test.beforeAll(async ({ request, runtimeConfig }: any) => {
 });
 
 test.describe('Authentication Journey - Password Only', () => {
-  test('TC01 - Create password-only auth journey and verify login success with password', async ({ rulesApi, runtimeConfig, browser }: AuthJourneyFixtures) => {
+  test('TC01 - Create password-only auth journey via Rules Engine and verify login success', async ({ rulesApi, loginPage }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
-    await test.step('Step 1: Create password-only rule via Rules Engine with grant access', async () => {
+
+    await test.step('Step 1: Create a password-only rule via Rules Engine with grant access decision', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         decision: 'grant_access',
@@ -80,7 +79,7 @@ test.describe('Authentication Journey - Password Only', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 2: Create password-only rule via Rules Engine with mfa needed for allowed factors as password', async () => {
+    await test.step('Step 2: Create a password-only rule via Rules Engine with MFA needed for password factor', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -98,31 +97,24 @@ test.describe('Authentication Journey - Password Only', () => {
     });
 
     await test.step('Step 3: Verify user authentication journey in UI', async () => {
-      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: null });
-      const page = await context.newPage();
-      const loginPage = new LoginPage(page, runtimeConfig);
-
       await loginPage.navigate();
       await loginPage.openSignInUsingUsername();
       await loginPage.submitUsername(testUser);
       await loginPage.submitPassword(userPassword);
       await loginPage.verifyLoginSuccess('User');
       await loginPage.logout(testUser);
-
-      await page.close();
-      await context.close();
     });
   });
 
 });
 
 test.describe('Authentication Journey - Password with Email OTP', () => {
-  test('TC02 - Create password with email OTP auth journey and verify login success with password', async ({ rulesApi, adminApis, runtimeConfig, browser }: AuthJourneyFixtures) => {
+  test('TC02 - Create password with email OTP auth journey via Rules Engine and verify login success', async ({ rulesApi, adminApis, loginPage }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
-    let initialJwt: string, capturedOtp: string, finalAuthenticatedJwt: string | AnyARecord;
+    let capturedOtp: string;
 
-    await test.step('Step 1: Create a Password and Email OTP rule via the Rules Engine with mfa_needed set for the required factor: email_otp', async () => {
+    await test.step('Step 1: Create a Password and Email OTP rule via Rules Engine with mfa_needed set for email OTP', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -140,7 +132,7 @@ test.describe('Authentication Journey - Password with Email OTP', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 2: Create a Password and Email OTP rule via the Rules Engine with grant access decision', async () => {
+    await test.step('Step 2: Create a Password and Email OTP rule via Rules Engine with grant access decision', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -157,7 +149,7 @@ test.describe('Authentication Journey - Password with Email OTP', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 3: Create a Password and Email OTP rule via the Rules Engine with mfa_needed set for the required factor: password', async () => {
+    await test.step('Step 3: Create a Password and Email OTP rule via Rules Engine with mfa_needed set for password factor', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -175,10 +167,6 @@ test.describe('Authentication Journey - Password with Email OTP', () => {
     });
 
     await test.step('Step 4: Verify user authentication journey in UI', async () => {
-      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: null });
-      const page = await context.newPage();
-      const loginPage = new LoginPage(page, runtimeConfig);
-
       await loginPage.navigate();
       await loginPage.openSignInUsingUsername();
       await loginPage.submitUsername(testUser);
@@ -189,22 +177,17 @@ test.describe('Authentication Journey - Password with Email OTP', () => {
       await loginPage.enterVerificationCode(capturedOtp);
       await loginPage.verifyLoginSuccess('User');
       await loginPage.logout(testUser);
-
-      await page.close();
-      await context.close();
     });
   });
 });
 
 test.describe('Authentication Journey - Login with Push', () => {
-  test('TC03 - Create login with password and push notification auth journey via Rules Engine and verify authentication via API', async ({ rulesApi, adminApis, userMgmtApi, loginPage, page }: AuthJourneyFixtures) => {
+  test('TC03 - Create login with password and push notification auth journey via Rules Engine and verify login success via UI', async ({ rulesApi, adminApis, userMgmtApi, loginPage, page }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
-    let accessCode: string, sessionId: string, initialJwt: string;
-    let userInfo: any, sessionData: any;
-    let finalAuthenticatedJwt: string;
+    let accessCode: string;
 
-    await test.step('Step 1: Create a rule via Rules Engine to demand password factor initially', async () => {
+    await test.step('Step 1: Create a password rule via Rules Engine with MFA needed for password factor', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -218,7 +201,7 @@ test.describe('Authentication Journey - Login with Push', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 2: Create a rule via Rules Engine to demand Push notification after password completion', async () => {
+    await test.step('Step 2: Create a Password and Push rule via Rules Engine with mfa_needed set for push factor', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -249,7 +232,7 @@ test.describe('Authentication Journey - Login with Push', () => {
 
     await test.step('Step 4: API - Fetch user info to link device', async () => {
       Logger.log('API', 'STEP 4', `Fetching user information for user: ${testUser} ...`);
-      userInfo = await userMgmtApi.fetchUserInfo(testUser);
+      await userMgmtApi.fetchUserInfo(testUser);
       Logger.log('API', 'INFO', `Fetched user info for: ${testUser}`);
     });
 
@@ -264,51 +247,27 @@ test.describe('Authentication Journey - Login with Push', () => {
       Logger.log('SUCCESS', `Successfully redeemed code and linked device for user: ${testUser}`);
     });
 
-    // await test.step('Step 7: API - Create push session', async () => {
-    //   Logger.log('API', 'STEP 7', `Submitting password credentials for user: ${testUser} to obtain initial JWT...`);
-    //   const response = await adminApis.authenticateWithPasswordForInitialJWT(testUser);
-    //   expect(response.jwt, 'Initial JWT should not be undefined').toBeDefined();
-    //   expect(response.jwt.length, 'Initial JWT should be a valid string').toBeGreaterThan(10);
-    //   initialJwt = response.jwt;
-    //   Logger.log('API', 'INFO', `Initial JWT obtained: ${initialJwt.substring(0, 30)}...`);
-    //   Logger.log('API', 'STEP 7', `Initiating push session creation workflow for user: ${testUser}...`);
-    //   sessionId = await adminApis.createAuthenticationSession(testUser, 'push');
-    //   expect(sessionId).toBeDefined();
-    //   Logger.log('SUCCESS', `Push session initialization complete. Session ID: ${sessionId}`);
-    // });
-
-    // await test.step('Step 8: API - Authenticate push session to accept', async () => {
-    //   Logger.log('API', 'STEP 8', `Dispatching push notification authentication accept payloads...`);
-    //   sessionData = await adminApis.authenticateSession(testUser);
-    //   expect(sessionData).toBeDefined();
-    //   Logger.log('SUCCESS', `Push session authentication payload accepted successfully.`);
-    // });
-
-    // await test.step('Step 9: API - Poll request access to get JWT', async () => {
-    //   Logger.log('API', 'STEP 9', `Starting request_access token exchange polling pipeline loop...`);
-    //   finalAuthenticatedJwt = await adminApis.pollRequestAccess(10, initialJwt);
-    //   expect(finalAuthenticatedJwt).toBeDefined();
-    //   Logger.log('SUCCESS', `Polling workflow finalized. Target Authenticated JWT securely obtained.`);
-    // });
-
-    await test.step('Step 10 - Verify user authentication journey in UI with Push notification is displayed', async () => {
-
+    await test.step('Step 7: Verify user authentication journey in UI with Push notification is displayed', async () => {
       await loginPage.navigate();
       await loginPage.openSignInUsingUsername();
       await loginPage.submitUsername(testUser);
       await loginPage.submitPassword(userPassword);
       await loginPage.verifyPushNotificationSignInScreen();
-      const sessiondata = await adminApis.interceptAndApproveUiSession(page, testUser, 'push');
-      console.log("jsdvhjcdvs &&&&&&&&&&&&&&&&&& ", sessiondata);
-
+      const sessionId = await adminApis.interceptAndGetUiSessionId(page);
+      expect(sessionId).toBeDefined();
+      const sessionData = await adminApis.authenticateSession(testUser, 'push');
+      expect(sessionData).toBeDefined();
+      await loginPage.verifyLoginSuccess('User');
+      await loginPage.logout(testUser);
     });
 
   });
 
-  test('TC04 - Create login with password and push notification auth journey via Rules Engine and Verify the Authentication Methods Not Set Up message.', async ({ rulesApi, adminApis, userMgmtApi, runtimeConfig, browser }: AuthJourneyFixtures) => {
+  test('TC04 - Create login with password and push notification auth journey via Rules Engine and verify "Authentication Methods Not Set Up" message', async ({ rulesApi, loginPage }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
-    await test.step('Step 1: Create a Password and Push rule via the Rules Engine with mfa_needed set for the required factor: push and uwl', async () => {
+
+    await test.step('Step 1: Create a Password and Push rule via Rules Engine with mfa_needed set for push and UWL', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -326,7 +285,7 @@ test.describe('Authentication Journey - Login with Push', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 2: Create a Password and Push rule via the Rules Engine with grant access decision', async () => {
+    await test.step('Step 2: Create a Password and Push rule via Rules Engine with grant access decision', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -343,7 +302,7 @@ test.describe('Authentication Journey - Login with Push', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 3: Create a Password rule via the Rules Engine with mfa_needed set for the required factor: password', async () => {
+    await test.step('Step 3: Create a Password rule via Rules Engine with mfa_needed set for password factor', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -361,31 +320,24 @@ test.describe('Authentication Journey - Login with Push', () => {
     });
 
     await test.step('Step 4: Verify "No Authentication Methods Setup" Error Message in UI', async () => {
-      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: null });
-      const page = await context.newPage();
-      const loginPage = new LoginPage(page, runtimeConfig);
-
       await loginPage.navigate();
       await loginPage.openSignInUsingUsername();
       await loginPage.submitUsername(testUser);
       await loginPage.submitPassword(userPassword);
       await loginPage.verifyAuthenticationMethodSelection();
       await loginPage.verifyDoNotSetUpAuthMethodsIsDisplayed();
-
-      await page.close();
-      await context.close();
     });
 
   });
 });
 
 test.describe('Authentication Journey - Login with QR Code', () => {
-  test('TC05 - Create login with QR code auth journey and verify login success', async ({ rulesApi, adminApis, userMgmtApi, browser, runtimeConfig }: AuthJourneyFixtures) => {
+  test('TC05 - Create login with QR code auth journey via Rules Engine and verify login success', async ({ rulesApi, adminApis, userMgmtApi, loginPage, runtimeConfig }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
     let accessCode: string, sessionData: any, userInfo: any;
 
-    await test.step('Step 1: Create a QR rule via the Rules Engine with mfa_needed set for the required factor: qr and uwl', async () => {
+    await test.step('Step 1: Create a QR rule via Rules Engine with mfa_needed set for QR and UWL', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -402,7 +354,7 @@ test.describe('Authentication Journey - Login with QR Code', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 2: Create a QR rule via the Rules Engine with grant access decision', async () => {
+    await test.step('Step 2: Create a QR rule via Rules Engine with grant access decision', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -435,11 +387,7 @@ test.describe('Authentication Journey - Login with QR Code', () => {
       Logger.log('SUCCESS', `Successfully redeemed code and linked device for user: ${testUser}`);
     });
 
-    await test.step('Step 9: Verify user authentication journey in UI with QR Code is displayed', async () => {
-      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: null });
-      const page = await context.newPage();
-      const loginPage = new LoginPage(page, runtimeConfig);
-
+    await test.step('Step 6: Verify user authentication journey in UI with QR code is displayed', async () => {
       await loginPage.navigate();
       await loginPage.openSignInUsingUsername();
       await loginPage.submitUsername(testUser);
@@ -453,17 +401,15 @@ test.describe('Authentication Journey - Login with QR Code', () => {
       Logger.log('SUCCESS', `QR session authentication successful.`);
       await loginPage.verifyLoginSuccess('User');
       await loginPage.logout(testUser);
-
-      await page.close();
-      await context.close();
     });
 
   });
 
-  test('TC06 - Create login with QR code auth journey via Rules Engine and Verify the Authentication Methods Not Set Up message.', async ({ rulesApi, browser, runtimeConfig }: AuthJourneyFixtures) => {
+  test('TC06 - Create login with QR code auth journey via Rules Engine and verify "Authentication Methods Not Set Up" message', async ({ rulesApi, loginPage }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
-    await test.step('Step 1: Create a QR rule via the Rules Engine with mfa_needed set for the required factor: qr and uwl', async () => {
+
+    await test.step('Step 1: Create a QR rule via Rules Engine with mfa_needed set for QR and UWL', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -480,7 +426,7 @@ test.describe('Authentication Journey - Login with QR Code', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 2: Create a QR rule via the Rules Engine with grant access decision', async () => {
+    await test.step('Step 2: Create a QR rule via Rules Engine with grant access decision', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         conditions: [
@@ -497,28 +443,22 @@ test.describe('Authentication Journey - Login with QR Code', () => {
     });
 
     await test.step('Step 3: Verify "No Authentication Methods Setup" Error Message in UI', async () => {
-      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: null });
-      const page = await context.newPage();
-      const loginPage = new LoginPage(page, runtimeConfig);
-
       await loginPage.navigate();
       await loginPage.openSignInUsingUsername();
       await loginPage.submitUsername(testUser);
       await loginPage.verifyAuthenticationMethodSelection();
       await loginPage.verifyDoNotSetUpAuthMethodsIsDisplayed();
-
-      await page.close();
-      await context.close();
     });
 
   });
 });
 
 test.describe('Authentication Journey - Deny Access', () => {
-  test('TC07 - Create deny access rule via Rules Engine and verify login failure', async ({ browser, runtimeConfig, rulesApi }: AuthJourneyFixtures) => {
+  test('TC07 - Create deny access rule via Rules Engine and verify login failure', async ({ loginPage, rulesApi }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
-    await test.step('Step 1: Create deny access rule via Rules Engine', async () => {
+
+    await test.step('Step 1: Create a deny access rule via Rules Engine', async () => {
       const ruleBody = rulesApi.createDynamicBodyRule({
         username: testUser,
         decision: 'deny_access',
@@ -532,18 +472,11 @@ test.describe('Authentication Journey - Deny Access', () => {
       ruleIds.push(response.data._id!);
     });
 
-    await test.step('Step 2: Verify rule creation in UI', async () => {
-      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: null });
-      const page = await context.newPage();
-      const loginPage = new LoginPage(page, runtimeConfig);
-
+    await test.step('Step 2: Verify access is denied in UI', async () => {
       await loginPage.navigate();
       await loginPage.openSignInUsingUsername();
       await loginPage.submitUsername(testUser);
       await loginPage.verifyAccessDenied();
-
-      await page.close();
-      await context.close();
     });
   });
 });
