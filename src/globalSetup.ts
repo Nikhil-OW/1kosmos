@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { Logger } from '@utils/logger';
 
 async function globalSetup() {
     const targets = [
@@ -9,17 +10,17 @@ async function globalSetup() {
 
     targets.forEach(dirPath => {
         const folderName = path.basename(dirPath);
-        console.log(`🔍 Checking path: ${dirPath}`);
+        Logger.log('INFO', 'SETUP', `Checking path: ${dirPath}`);
 
         if (fs.existsSync(dirPath)) {
             try {
                 fs.rmSync(dirPath, { recursive: true, force: true });
-                console.log(`✅ SUCCESS: Old ${folderName} wiped out completely.`);
+                Logger.log('SUCCESS', 'SETUP', `Old ${folderName} wiped out completely.`);
             } catch (err: any) {
-                console.log(`❌ FAILED to delete ${folderName}: ${err.message}`);
+                Logger.log('ERROR', 'SETUP', `Failed to delete ${folderName}: ${err.message}`);
             }
         } else {
-            console.log(`ℹ️ Clean Slate: ${folderName} folder was already empty/clean.`);
+            Logger.log('INFO', 'SETUP', `Clean Slate: ${folderName} folder was already empty/clean.`);
         }
     });
 }

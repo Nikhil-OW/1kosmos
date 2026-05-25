@@ -120,7 +120,8 @@ export class AdminApis {
 
             this.config.tenantId = tenantId;
             this.config.communityId = communityId;
-            Logger.log('SUCCESS', `Global Config Updated | Tenant: ${tenantId} | Community: ${communityId}`);
+            this.config.communityPublicKey = decryptedJson.community?.publicKey;
+            Logger.log('SUCCESS', `Global Config Updated | Tenant: ${tenantId} | Community: ${communityId} | CommunityPubKey: ${this.config.communityPublicKey}`);
 
             return { tenantId, communityId };
 
@@ -804,7 +805,7 @@ export class AdminApis {
     async unlinkUserDevice(username: string, jwtToken: string): Promise<any> {
         Logger.log('API', 'UNLINK', `Requesting authentication method login options unlink device for user: ${username}`);
 
-        const endpoint = `${this.config.adminApiUrl}/users/unlink_login_options`;
+        const endpoint = `${this.config.adminApiUrl}/users/unlinkuser`;
         const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
 
         if (!servicePublicKey) {
@@ -822,16 +823,14 @@ export class AdminApis {
             "user": {
                 "uid": this.config.userUid,
                 "username": `${username}`,
-                "authModuleId": this.config.dbAuthModule
+                "authModuleId": this.config.userModuleId || this.config.dbAuthModule
             },
             "community": {
-                "id": this.config.tenantId,
+                "id": this.config.communityId,
                 "name": this.config.communityName,
-                "publicKey": servicePublicKey
+                "publicKey": this.config.communityPublicKey || servicePublicKey
             },
-            "did": deviceDid,
-            "unlink_user_pin": true,
-            "unlink_typingPhrase": true
+            "did": deviceDid
         };
 
         try {
@@ -858,7 +857,18 @@ export class AdminApis {
             }
 
             const responseData = response.data;
-            Logger.log('SUCCESS', 'UNLINK_COMPLETE', `Server response verified: ${responseData.message}`);
+            let decryptedData = responseData;
+            if (responseData && responseData.data) {
+                try {
+                    const decryptionResult = await this.encryptOrDecryptUsingCaas(responseData.data, servicePublicKey, privateKey, 'decrypt');
+                    decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
+                } catch (e: any) {
+                    Logger.log('WARN', 'API', `Failed to decrypt unlink response data: ${e.message}`);
+                }
+            }
+
+            Logger.log('SUCCESS', 'UNLINK_COMPLETE', `Server response verified: ${JSON.stringify(decryptedData)}`);
+            response.data = decryptedData;
 
             return response;
 

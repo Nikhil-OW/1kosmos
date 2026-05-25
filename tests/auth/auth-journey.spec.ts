@@ -182,7 +182,7 @@ test.describe('Authentication Journey - Password with Email OTP', () => {
 });
 
 test.describe('Authentication Journey - Login with Push', () => {
-  test('TC03 - Create login with password and push notification auth journey via Rules Engine and verify login success via UI', async ({ rulesApi, adminApis, userMgmtApi, loginPage, page }: AuthJourneyFixtures) => {
+  test('TC03 - Create login with password and push notification auth journey via Rules Engine and verify login success via UI', async ({ rulesApi, adminApis, userMgmtApi, loginPage, page, runtimeConfig }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
     let accessCode: string;
@@ -261,6 +261,16 @@ test.describe('Authentication Journey - Login with Push', () => {
       await loginPage.logout(testUser);
     });
 
+    await test.step('Step 8: API - Unlink user device', async () => {
+      const communityId = runtimeConfig.communityId;
+      const userJwt = await page.evaluate((cid) => window.localStorage.getItem(`${cid}_token`), communityId);
+      expect(userJwt).toBeDefined();
+
+      Logger.log('API', 'INFO', `Unlinking user device using basic user's own JWT...`);
+      const unlinkRes = await adminApis.unlinkUserDevice(testUser, userJwt!);
+      expect(unlinkRes.status).toBe(200);
+      expect(unlinkRes.data.message).toBeDefined();
+    });
   });
 
   test('TC04 - Create login with password and push notification auth journey via Rules Engine and verify "Authentication Methods Not Set Up" message', async ({ rulesApi, loginPage }: AuthJourneyFixtures) => {
@@ -332,7 +342,7 @@ test.describe('Authentication Journey - Login with Push', () => {
 });
 
 test.describe('Authentication Journey - Login with QR Code', () => {
-  test('TC05 - Create login with QR code auth journey via Rules Engine and verify login success', async ({ rulesApi, adminApis, userMgmtApi, loginPage, runtimeConfig }: AuthJourneyFixtures) => {
+  test('TC05 - Create login with QR code auth journey via Rules Engine and verify login success', async ({ rulesApi, adminApis, userMgmtApi, loginPage, runtimeConfig, page }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
     let accessCode: string, sessionData: any, userInfo: any;
@@ -403,6 +413,16 @@ test.describe('Authentication Journey - Login with QR Code', () => {
       await loginPage.logout(testUser);
     });
 
+    await test.step('Step 7: API - Unlink user device', async () => {
+      const communityId = runtimeConfig.communityId;
+      const userJwt = await page.evaluate((cid) => window.localStorage.getItem(`${cid}_token`), communityId);
+      expect(userJwt).toBeDefined();
+
+      Logger.log('API', 'INFO', `Unlinking user device using basic user's own JWT...`);
+      const unlinkRes = await adminApis.unlinkUserDevice(testUser, userJwt!);
+      expect(unlinkRes.status).toBe(200);
+      expect(unlinkRes.data.message).toBeDefined();
+    });
   });
 
   test('TC06 - Create login with QR code auth journey via Rules Engine and verify "Authentication Methods Not Set Up" message', async ({ rulesApi, loginPage }: AuthJourneyFixtures) => {
