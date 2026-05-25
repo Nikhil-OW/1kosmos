@@ -120,7 +120,8 @@ export class AdminApis {
 
             this.config.tenantId = tenantId;
             this.config.communityId = communityId;
-            Logger.log('SUCCESS', `Global Config Updated | Tenant: ${tenantId} | Community: ${communityId}`);
+            this.config.communityPublicKey = decryptedJson.community?.publicKey;
+            Logger.log('SUCCESS', `Global Config Updated | Tenant: ${tenantId} | Community: ${communityId} | CommunityPubKey: ${this.config.communityPublicKey}`);
 
             return { tenantId, communityId };
 
@@ -804,7 +805,7 @@ export class AdminApis {
     async unlinkUserDevice(username: string, jwtToken: string): Promise<any> {
         Logger.log('API', 'UNLINK', `Requesting authentication method login options unlink device for user: ${username}`);
 
-        const endpoint = `${this.config.adminApiUrl}/users/unlink_login_options`;
+        const endpoint = `${this.config.adminApiUrl}/users/unlinkuser`;
         const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi();
 
         if (!servicePublicKey) {
@@ -812,23 +813,24 @@ export class AdminApis {
         }
 
         const rawRequestId = await this.generateRequestId();
-        const clientLicense = this.config.licenseKey; // Grab the structural license key from your config
+        const clientLicense = this.config.licenseKey;
         const privateKey = this.config.privateKey;
+
+        const device = DataGenerator.getVirtualDeviceDetails() || this.config.device1;
+        const deviceDid = this.config.deviceDid || device?.did;
 
         const payload = {
             "user": {
                 "uid": this.config.userUid,
                 "username": `${username}`,
-                "authModuleId": this.config.dbAuthModule
+                "authModuleId": this.config.userModuleId || this.config.dbAuthModule
             },
             "community": {
-                "id": this.config.tenantId,
+                "id": this.config.communityId,
                 "name": this.config.communityName,
-                "publicKey": servicePublicKey
+                "publicKey": this.config.communityPublicKey || servicePublicKey
             },
-            "did": this.config.deviceDid,
-            "unlink_user_pin": true,
-            "unlink_typingPhrase": true
+            "did": deviceDid
         };
 
         try {
@@ -843,6 +845,7 @@ export class AdminApis {
                 'Content-Type': 'application/json',
                 'requestid': encRequestId,
                 'publickey': this.config.publicKey,
+                'licensekey': encLicenseKey,
                 'Authorization': `Bearer ${encJwt}`
             });
 
@@ -854,7 +857,18 @@ export class AdminApis {
             }
 
             const responseData = response.data;
-            Logger.log('SUCCESS', 'UNLINK_COMPLETE', `Server response verified: ${responseData.message}`);
+            let decryptedData = responseData;
+            if (responseData && responseData.data) {
+                try {
+                    const decryptionResult = await this.encryptOrDecryptUsingCaas(responseData.data, servicePublicKey, privateKey, 'decrypt');
+                    decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
+                } catch (e: any) {
+                    Logger.log('WARN', 'API', `Failed to decrypt unlink response data: ${e.message}`);
+                }
+            }
+
+            Logger.log('SUCCESS', 'UNLINK_COMPLETE', `Server response verified: ${JSON.stringify(decryptedData)}`);
+            response.data = decryptedData;
 
             return response;
 
@@ -864,229 +878,127 @@ export class AdminApis {
         }
     }
 
-    async interceptAndApproveUiSession1(page: any, username: string, authMode: 'push' | 'qr'): Promise<string> {
-        console.log(`\n================================================================`);
-        console.log(`[DEBUG] 🚀 STARTING REPEATABLE FOR-LOOP INTERCEPTOR FOR PATH: /new`);
-        console.log(`================================================================`);
-
+    async interceptAndGetUiSessionId(page: any): Promise<string> {
         let interceptedResponse: any = null;
-
-        console.log(`[DEBUG] ⏳ Attaching live network tab traffic listener...`);
-        try {
-            interceptedResponse = await page.waitForResponse((response: any) => {
-                const url = response.url();
-                const method = response.request().method();
-                const status = response.status();
-
-                // MATCHES EXACT VALUE: /adminapi/sessions/session/new
-                const matchesUrl = url.includes('/adminapi/sessions/session/new');
-                const isPut = method === 'PUT';
-                const isSuccess = status === 200 || status === 201;
-
-                return matchesUrl && isPut && isSuccess;
-            }, { timeout: 30000 }); // Generous 30s window to capture the event
-
-        } catch (timeoutErr) {
-            console.log(`❌ [DEBUG TERMINAL TIMEOUT] No matching MFA challenge packet appeared on the wire.`);
-            throw new Error(`FAILED: Network listener timed out waiting for active /adminapi/sessions/session/new packet.`);
-        }
-
-        console.log(`[DEBUG] ✅ Network interceptor successfully isolated the live container!`);
-
-        // --- STEP 1: PRINT RAW RESPONSE PAYLOAD ---
-        const responseData = await interceptedResponse.json();
-        console.log(`\n----------------------------------------------------------------`);
-        console.log(`[DEBUG STEP 1] Raw API Response data block captured:`);
-        console.log(JSON.stringify(responseData, null, 2));
-        console.log(`----------------------------------------------------------------\n`);
-
-        // Extract and assign the response public key to sessionPublicKey
-        const sessionPublicKey = responseData?.publicKey || '';
-        this.config.sessionPublicKey = sessionPublicKey;
-
-        console.log(`[DEBUG] 🔑 Stored response public key into config: "${sessionPublicKey.substring(0, 30)}..."`);
-
-        const privateKey = this.config.privateKey;
-        let decryptedData: any = null;
-
-        // --- STEP 2: DECRYPT AND PRINT ---
-        if (responseData && responseData.data) {
-            console.log(`[DEBUG] 🔐 Passing active data string to CaaS for decryption using stored sessionPublicKey...`);
-            try {
-                const decryptionResult = await this.encryptOrDecryptUsingCaas(responseData.data, sessionPublicKey, privateKey, 'decrypt');
-                decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
-
-                console.log(`\n----------------------------------------------------------------`);
-                console.log(`[DEBUG STEP 2 SUCCESS] 📂 Decrypted Object payload structure content details:`);
-                console.log(JSON.stringify(decryptedData, null, 2));
-                console.log(`----------------------------------------------------------------\n`);
-            } catch (caasError: any) {
-                console.log(`[DEBUG] ❌ Decryption layer failure: ${caasError.message}`);
-                throw caasError;
-            }
-        } else {
-            console.log(`[DEBUG] ⚠️ Error: Response payload missing '.data' field. Cannot decrypt.`);
-        }
-
-        const sessionId = decryptedData?.sessionId || decryptedData?.id || responseData?.sessionId || '';
-        this.config.sessionId = sessionId;
-
-        return sessionId;
-    }
-
-    async interceptAndApproveUiSession(page: any, username: string, authMode: 'push' | 'qr'): Promise<string> {
-        console.log(`\n================================================================`);
-        console.log(`[DEBUG] 🚀 STARTING RESILIENT FOR-LOOP INTERCEPTOR VIA CLICK RETRIES`);
-        console.log(`================================================================`);
-
-        let interceptedResponse: any = null;
-        const maxAttempts = 5;
+        const maxAttempts = 4;
         const sendPushLocator = page.locator(`//*[text()='Send push']`);
-
         const cdpSession = await page.context().newCDPSession(page);
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            console.log(`[DEBUG] ⏳ Attempt ${attempt} of ${maxAttempts}: Monitoring network streams...`);
-
             try {
                 if (attempt > 1) {
-                    console.log(`[DEBUG] 🧹 Flashing Browser Network Tab context logs for Attempt ${attempt}...`);
-                    try {
-                        await cdpSession.send('Network.clearBrowserCache');
-                        await cdpSession.send('Network.disable');
-                        await cdpSession.send('Network.enable');
-                    } catch (cdpErr: any) {
-                        console.log(`[DEBUG] ⚠️ Non-terminal CDP Network clear warning: ${cdpErr.message}`);
-                    }
+                    await cdpSession.send('Network.clearBrowserCache').catch(() => { });
+                    await cdpSession.send('Network.disable').catch(() => { });
+                    await cdpSession.send('Network.enable').catch(() => { });
 
-                    console.log(`[DEBUG] 📡 Re-requesting token stream. Triggering concurrent listener + click...`);
-
-                    const [_, response] = await Promise.all([
+                    const [, response] = await Promise.all([
                         sendPushLocator.click(),
-                        page.waitForResponse((response: any) => {
-                            const url = response.url();
-                            const method = response.request().method();
-                            const status = response.status();
-
-                            const matchesUrl = url.includes('/adminapi/sessions/session/new');
-                            const isPut = method === 'PUT';
-                            const isSuccess = status === 200 || status === 201;
-
-                            return matchesUrl && isPut && isSuccess;
-                        }, { timeout: 15000 })
+                        page.waitForResponse((res: any) =>
+                            res.url().includes('/adminapi/sessions/session/new') &&
+                            res.request().method() === 'PUT' &&
+                            (res.status() === 200 || res.status() === 201),
+                            { timeout: 15000 })
                     ]);
-
                     interceptedResponse = response;
                 } else {
-                    interceptedResponse = await page.waitForResponse((response: any) => {
-                        const url = response.url();
-                        const method = response.request().method();
-                        const status = response.status();
-
-                        const matchesUrl = url.includes('/adminapi/sessions/session/new');
-                        const isPut = method === 'PUT';
-                        const isSuccess = status === 200 || status === 201;
-
-                        return matchesUrl && isPut && isSuccess;
-                    }, { timeout: 15000 });
+                    interceptedResponse = await page.waitForResponse((res: any) =>
+                        res.url().includes('/adminapi/sessions/session/new') &&
+                        res.request().method() === 'PUT' &&
+                        (res.status() === 200 || res.status() === 201),
+                        { timeout: 15000 });
                 }
 
-                if (interceptedResponse) {
-                    console.log(`[DEBUG] ✅ API displayed successfully at top layer of the Network tab on attempt ${attempt}!`);
-                    break;
-                }
-            } catch (timeoutErr) {
-                console.log(`[DEBUG] ⚠️ Attempt ${attempt} timed out. API did not clear backend thresholds.`);
-
+                if (interceptedResponse) break;
+            } catch (err) {
                 if (attempt === maxAttempts) {
                     await cdpSession.detach().catch(() => { });
-                    throw new Error(`FAILED: Network monitor timed out after maxing out all ${maxAttempts} 'Send push' click retry cycles.`);
+                    throw new Error(`FAILED: Network listener timed out after ${maxAttempts} retry click cycles.`);
                 }
             }
         }
-
         await cdpSession.detach().catch(() => { });
 
-        console.log(`[DEBUG] ✅ Network interceptor successfully isolated the live container!`);
-
-        // --- STEP 1: READ JSON BODY ---
         const responseData = await interceptedResponse.json();
-        console.log(`\n----------------------------------------------------------------`);
-        console.log(`[DEBUG STEP 1] Raw API Response data block captured at top layer:`);
-        console.log(JSON.stringify(responseData, null, 2));
-        console.log(`----------------------------------------------------------------\n`);
-
         const sessionPublicKey = responseData?.publicKey || '';
+        if (!sessionPublicKey)
+            throw new Error("FAILED: sessionPublicKey missing from intercepted envelope.");
 
-        // Fetch the structural service validation keys globally
-        const servicePublicKey = await this.fetchServicePublicKeyUsingAdminApi().catch(() => null);
+        this.config.sessionPublicKey = sessionPublicKey;
 
-        const privateKey = this.config.privateKey;
-        let decryptionResult: string | null = null;
+        let sessionId = '';
+        try {
+            sessionId = await page.evaluate(() => {
+                const rootEl = document.getElementById('root') || document.querySelector('body > div');
+                if (!rootEl) return '';
+                const reactKey = Object.keys(rootEl).find(k => k.startsWith('__reactContainer') || k.startsWith('__reactFiber'));
+                if (!reactKey) return '';
 
-        // --- STEP 2: MULTI-KEY FALLBACK DECRYPTION MATRIX ---
-        if (responseData && responseData.data) {
-            console.log(`[DEBUG] 🔐 Initializing resilient cryptographic format routing for CaaS execution...`);
+                const seen = new Set();
+                function searchFiber(node: any): any {
+                    if (!node || seen.has(node)) return null;
+                    seen.add(node);
 
-            const variants = [
-                { name: "Raw Intercepted UI Base64 Key", key: sessionPublicKey },
-                {
-                    name: "Uncompressed Point Format (04 Byte Hex Prefix)",
-                    get key() {
-                        const rawBuffer = Buffer.from(sessionPublicKey, 'base64');
-                        if (rawBuffer.length === 64) {
-                            return Buffer.concat([Buffer.from([0x04]), rawBuffer]).toString('base64');
+                    if (node.memoizedState) {
+                        let state = node.memoizedState;
+                        while (state) {
+                            if (state.memoizedState && typeof state.memoizedState === 'object') {
+                                const result = searchObj(state.memoizedState);
+                                if (result) return result;
+                            }
+                            state = state.next;
                         }
-                        return sessionPublicKey;
                     }
-                }
-            ];
 
-            // Dynamically insert global master service public key variation if available
-            if (servicePublicKey) {
-                variants.push({ name: "Global Service Public Key Master Mapping", key: servicePublicKey });
-            }
-
-            for (const variant of variants) {
-                console.log(`[DEBUG] ⚡ Trying decryption payload variant: [${variant.name}]`);
-                try {
-                    const res = await this.encryptOrDecryptUsingCaas(responseData.data, variant.key, privateKey, 'decrypt');
-                    if (res) {
-                        decryptionResult = res;
-                        console.log(`[DEBUG] 🎯 SUCCESS! Decryption cracked using variant: [${variant.name}]`);
-                        this.config.sessionPublicKey = variant.key;
-                        break;
+                    if (node.stateNode) {
+                        const result = searchObj(node.stateNode);
+                        if (result) return result;
                     }
-                } catch (err: any) {
-                    console.log(`[DEBUG] ⚠️ Variant [${variant.name}] rejected by CaaS engine (Status 500 / Fault).`);
+
+                    if (node.child) {
+                        const result = searchFiber(node.child);
+                        if (result) return result;
+                    }
+                    if (node.sibling) {
+                        const result = searchFiber(node.sibling);
+                        if (result) return result;
+                    }
+                    return null;
                 }
-            }
 
-            if (!decryptionResult) {
-                console.log(`\n❌ [CRITICAL PLATFORM FAULT] All cryptographic options exhausted.`);
-                console.log(`Check your test configuration setup where 'this.config.privateKey' is initialized.`);
-                throw new Error(`FAILED: CaaS gateway completely rejected decryption maps for payload.`);
-            }
+                function searchObj(obj: any): any {
+                    if (!obj || typeof obj !== 'object') return null;
+                    if (obj instanceof Element || obj === window) return null;
 
-            let decryptedData: any = null;
-            try {
-                decryptedData = typeof decryptionResult === 'string' ? JSON.parse(decryptionResult) : decryptionResult;
+                    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-                console.log(`\n----------------------------------------------------------------`);
-                console.log(`[DEBUG STEP 2 SUCCESS] 📂 Decrypted Object payload structure content details:`);
-                console.log(JSON.stringify(decryptedData, null, 2));
-                console.log(`----------------------------------------------------------------\n`);
-            } catch (jsonErr: any) {
-                console.log(`[DEBUG] ❌ Crypto text unlocked, but stream is not standard JSON: ${decryptionResult}`);
-                throw jsonErr;
-            }
+                    for (const key in obj) {
+                        try {
+                            const val = obj[key];
+                            if (typeof val === 'string' && uuidRegex.test(val)) {
+                                if (key.toLowerCase().includes('session')) {
+                                    return val;
+                                }
+                            }
+                            if (val && typeof val === 'object' && !seen.has(val)) {
+                                seen.add(val);
+                                const res = searchObj(val);
+                                if (res) return res;
+                            }
+                        } catch (e) { }
+                    }
+                    return null;
+                }
 
-            const sessionId = decryptedData?.sessionId || decryptedData?.id || responseData?.sessionId || '';
-            this.config.sessionId = sessionId;
-
-            return sessionId;
-        } else {
-            throw new Error("FAILED: Response payload missing '.data' field. Cannot decrypt.");
+                return searchFiber((rootEl as any)[reactKey]) || '';
+            });
+        } catch (e: any) {
+            console.log(`[DEBUG] Failed to evaluate React tree: ${e.message}`);
         }
+
+        if (!sessionId) {
+            throw new Error("FAILED: Session Tracking Identifiers missing from transaction parameters.");
+        }
+        this.config.sessionId = sessionId;
+        return sessionId;
     }
 }
