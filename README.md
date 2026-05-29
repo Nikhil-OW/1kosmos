@@ -1,109 +1,132 @@
-# Kosmos Playwright Framework
+# 🛡️ Kosmos Playwright Framework
 
-Reusable Playwright + TypeScript framework for tenant-scale authentication journey validation, featuring interactive HTML test execution reports via email and structured visual Allure reports.
+[![Playwright Version](https://img.shields.io/badge/playwright-v1.54.0-blue)](https://playwright.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-v5.8-blue)](https://www.typescriptlang.org/)
+[![License](https://img.shields.io/badge/License-Private-red)](#)
 
-## What this scaffold optimizes for
+A reusable Playwright + TypeScript test automation framework designed for tenant-scale authentication journey validation. Features automated, visually rich email notifications containing inline failure screenshots and compressed Allure reports.
 
-- **Reusable UI + API layers**: Keep auth-journey specs readable by encapsulating interactions in page objects and API helpers.
-- **Tenant-aware config**: Seamless environment switches via `configs/.env`.
-- **UI-based Cleanup**: Built-in flow (`homePage.ts`) to automatically unlink registered devices via UI dashboard post-authentication.
-- **Automated Email Reports**: Custom reporter that emails results with inline failure screenshots and a compressed Allure report attachment.
-- **Reliable failure artifacts**: Captures traces, screenshots, and videos on test failures.
+---
 
-## Project Layout
+## ✨ Features
 
-```text
-configs/
-  .env          Tenant and credentials configuration
-  smtp.json     SMTP server and email recipient configurations
-src/
-  api/          API clients for user and auth-journey setup
-  config/       Runtime and tenant config loading (runtimeConfig.ts)
-  fixtures/     Shared Playwright fixtures (testFixtures.ts)
-  pages/        UI page objects (basePage.ts, loginPage.ts, homePage.ts)
-  utils/        Email reporter (emailReporter.ts), logger, and helpers
-tests/
-  auth/         Authentication journey specs
+* **Tenant-Aware Configurations**: Run tests dynamically across different environments and brands using `configs/.env`.
+* **Automated Email Reports**: Custom reporter emails test summaries with inline failure screenshots and a compressed Allure report attachment.
+* **Auto-Cleanup via UI**: Automatically logs in, registers, validates, and cleanses (unlinks) registered devices on the dashboard to prevent account pollution.
+* **Failure Diagnostics**: Automatically captures browser traces, network logs, page screenshots, and video recordings on failure.
+
+---
+
+## 📋 Prerequisites
+
+Before setting up, ensure you have the following installed:
+* **Node.js** (v18 or higher)
+* **Allure CLI** (Optional, for generating local test reports: `npm install -g allure-commandline`)
+
+---
+
+## 🛠️ Getting Started
+
+### 1. Install Dependencies
+```bash
+npm install
+npx playwright install
 ```
 
-## Setup
+### 2. Configure Environment Variables (`configs/.env`)
+Create a `.env` file under the `configs/` directory:
+```ini
+DNS=your-tenant-dns.1kosmos.net
+COMMUNITY_NAME=your-community
+LICENSE_KEY=your-license-key
+PRIVATE_KEY=your-private-key
+PUBLIC_KEY=your-public-key
+ADMIN_USERNAME=your-admin-user
+ADMIN_PASSWORD=your-admin-pass
+ADMIN_EMAIL=your-admin-email
+BASIC_USERNAME=your-basic-user
+DB_AUTH_MODULE=your-db-auth-module-id
+CLIENT_TENANT_TAG=your-client-tenant-tag
+```
 
-1. **Install dependencies**:
-   ```powershell
-   npm install
-   ```
+### 3. Configure SMTP Settings (`configs/smtp.json`)
+Create an `smtp.json` file under `configs/` to route execution reports:
+```json
+{
+  "SEND_EMAIL_REPORTS": true,
+  "SEND_CONDITION": "always", 
+  "SMTP_HOST": "smtp.gmail.com",
+  "SMTP_PORT": 587,
+  "SMTP_SECURE": false,
+  "SMTP_USER": "your-email@example.com",
+  "SMTP_PASS": "your-app-password",
+  "SMTP_FROM": "1Kosmos Test Runner <noreply@1kosmos.net>",
+  "SMTP_TO": ["team@example.com"]
+}
+```
 
-2. **Configure environment variable file** at `configs/.env`:
-   ```ini
-   DNS=your-tenant-dns
-   COMMUNITY_NAME=your-community
-   LICENSE_KEY=your-license-key
-   PRIVATE_KEY=your-private-key
-   PUBLIC_KEY=your-public-key
-   ADMIN_USERNAME=your-admin-user
-   ADMIN_PASSWORD=your-admin-pass
-   ADMIN_EMAIL=your-admin-email
-   BASIC_USERNAME=your-basic-user
-   DB_AUTH_MODULE=your-db-auth-module-id
-   CLIENT_TENANT_TAG=your-client-tenant-tag
-   ```
+> [!IMPORTANT]
+> Both `configs/.env` and `configs/smtp.json` contain sensitive keys and credentials. They are locally configured in `.gitignore` and **must never be committed** to the remote repository.
 
-3. **Configure email reporting** at `configs/smtp.json`:
-   ```json
-   {
-     "SEND_EMAIL_REPORTS": true,
-     "SEND_CONDITION": "always", // "always", "on-failure", or "on-success"
-     "SMTP_HOST": "smtp.gmail.com",
-     "SMTP_PORT": 587,
-     "SMTP_SECURE": false,
-     "SMTP_USER": "your-smtp-email@example.com",
-     "SMTP_PASS": "your-app-specific-password",
-     "SMTP_FROM": "1Kosmos Test Runner <noreply@1kosmos.net>",
-     "SMTP_TO": ["recipient1@example.com"]
-   }
-   ```
+---
 
-## Execution Commands
+## 📂 Project Structure
 
-* **Run all tests**:
-  ```powershell
+```text
+configs/      # Environment & SMTP server configurations
+src/
+  api/        # API clients for pre-test setup and authentication
+  config/     # Environment-specific configuration loaders
+  fixtures/   # Custom Playwright fixtures (homePage, loginPage, etc.)
+  pages/      # Page Object Models (POMs) representing the application UI
+  utils/      # Custom reporters, loggers, and general helper scripts
+tests/
+  auth/       # Multi-tenant authentication journey specs
+```
+
+---
+
+## 🚀 Execution Commands
+
+* **Run all tests (Headless)**: 
+  ```bash
   npm test
   ```
-
-* **Run authentication tests only**:
-  ```powershell
+* **Run Auth specs only**: 
+  ```bash
   npm run test:auth
   ```
-
-* **Run tests and launch Allure report**:
-  ```powershell
+* **Run tests & generate Allure Report**: 
+  ```bash
   npm run test:allure
   ```
-
-* **Allure CLI operations**:
-  ```powershell
-  # Generate Allure HTML report from current results
-  npm run allure:generate
-
-  # Open the generated Allure report
-  npm run allure:open
-
-  # Serve Allure results directly on localhost:8080
+* **Start local Allure server**: 
+  ```bash
   npm run allure:serve
   ```
 
-## Implementation Details
+---
 
-### Email Reporter & Allure Compressor
-The project integrates a custom Playwright reporter at `src/utils/emailReporter.ts`. When a test run finishes:
-1. It reads the test outcomes (Passed, Failed, Skipped).
-2. It compiles a modern, responsive HTML body detailing statistics and step execution.
-3. For any failures, it strips terminal ANSI color codes and embeds the captured **failure screenshot inline** in the email body.
-4. It programmatically generates a single-file Allure HTML report, compresses it into a `.zip` file (usually reducing size by ~50% to stay under SMTP/Gmail limits), and attaches it to the email.
-5. Sends the email using the configured SMTP server settings in `configs/smtp.json`.
+## 🌐 CI/CD Integration
 
-### UI-Based Device Cleanup
-To prevent account lockouts or pollution across repeated test runs:
-* Tests that link a device (like Push and QR authentication flows) utilize `homePage.ts` to navigate to the **Login Options** tab on the user's dashboard.
-* It identifies the registered device and triggers the UI deletion flow, clean-unlinking the device, followed by a user logout.
+To run this framework in CI/CD pipelines (e.g., GitHub Actions), secrets can be injected directly into the environment:
+
+```yaml
+- name: Install dependencies
+  run: npm ci
+
+- name: Install Playwright Browsers
+  run: npx playwright install --with-deps
+
+- name: Run E2E Tests
+  run: npm test
+  env:
+    DNS: ${{ secrets.TENANT_DNS }}
+    COMMUNITY_NAME: ${{ secrets.COMMUNITY_NAME }}
+    ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+    ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+    SMTP_USER: ${{ secrets.SMTP_USER }}
+    SMTP_PASS: ${{ secrets.SMTP_PASS }}
+```
+
 
