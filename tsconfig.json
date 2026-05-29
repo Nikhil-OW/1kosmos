@@ -18,7 +18,6 @@
       "@pages/*": ["src/pages/*"],
       "@utils/*": ["src/utils/*"],
     },
-    "ignoreDeprecations": "6.0",
   },
   "include": ["playwright.config.ts", "src/**/*.ts", "tests/**/*.ts"]
 }

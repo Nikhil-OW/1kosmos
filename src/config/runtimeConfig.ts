@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import path from 'path';
 
 export type UserSeed = {
     username: string;
@@ -28,7 +29,7 @@ export type RuntimeConfig = {
     [key: string]: any;
 };
 
-dotenv.config();
+dotenv.config({ path: path.resolve(process.cwd(), 'configs/.env') });
 
 function cliValue(...names: string[]): string | undefined {
     const normalizedNames = names.map(name => name.toLowerCase());

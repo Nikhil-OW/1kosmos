@@ -36,12 +36,14 @@ export default defineConfig({
   },
   reporter: [
     ['json'],
+    ['line'],
     ['html', { open: 'never' }],
     ['allure-playwright', {
       detail: true,
       outputFolder: 'allure-results',
       suiteTitle: true,
-    }]
+    }],
+    ['./src/utils/emailReporter.ts']
   ],
   projects: [
     {
