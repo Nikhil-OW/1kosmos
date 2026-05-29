@@ -7,6 +7,7 @@ import { AdminApis } from '@api/adminApis';
 import { UserMgmtApi } from '@api/userMgmtApi';
 import { Logger } from '@utils/logger';
 import fs from 'fs';
+import { HomePage } from '@pages/homePage';
 
 type AppFixtures = {
   runtimeConfig: RuntimeConfig;
@@ -15,6 +16,7 @@ type AppFixtures = {
   loginPage: LoginPage;
   adminApis: AdminApis;
   userMgmtApi: UserMgmtApi;
+  homePage: HomePage;
   prepareElement: void;
 };
 
@@ -109,7 +111,12 @@ export const test = base.extend<AppFixtures>({
     }
     const userMgmtApi = new UserMgmtApi(request, runtimeConfig);
     await use(userMgmtApi);
-  }
+  },
+
+  homePage: async ({ page, runtimeConfig }, use) => {
+    const homePage = new HomePage(page, runtimeConfig);
+    await use(homePage);
+  },
 });
 
 export { expect } from '@playwright/test';

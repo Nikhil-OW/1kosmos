@@ -8,6 +8,7 @@ import { UserMgmtApi } from '@api/userMgmtApi';
 import { DataGenerator } from '@utils/dataGenerator';
 import { Logger } from '@utils/logger';
 import { AdminApis } from '@api/adminApis';
+import { HomePage } from '@pages/homePage';
 
 type AuthJourneyFixtures = {
   page: Page;
@@ -18,6 +19,7 @@ type AuthJourneyFixtures = {
   userMgmtApi: UserMgmtApi;
   adminApis: AdminApis;
   browser: any;
+  homePage: HomePage;
 };
 
 let sharedUsers: any[] = [];
@@ -182,7 +184,7 @@ test.describe('Authentication Journey - Password with Email OTP', () => {
 });
 
 test.describe('Authentication Journey - Login with Push', () => {
-  test('TC03 - Create login with password and push notification auth journey via Rules Engine and verify login success via UI', async ({ rulesApi, adminApis, userMgmtApi, loginPage, page, runtimeConfig }: AuthJourneyFixtures) => {
+  test('TC03 - Create login with password and push notification auth journey via Rules Engine and verify login success via UI', async ({ rulesApi, adminApis, userMgmtApi, loginPage, page, runtimeConfig, homePage }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
     let accessCode: string;
@@ -258,18 +260,9 @@ test.describe('Authentication Journey - Login with Push', () => {
       const sessionData = await adminApis.authenticateSession(testUser, 'push');
       expect(sessionData).toBeDefined();
       await loginPage.verifyLoginSuccess('User');
+      await homePage.navigateToLoginoptionsTab();
+      await homePage.deleteLinkedDevice();
       await loginPage.logout(testUser);
-    });
-
-    await test.step('Step 8: API - Unlink user device', async () => {
-      const communityId = runtimeConfig.communityId;
-      const userJwt = await page.evaluate((cid) => window.localStorage.getItem(`${cid}_token`), communityId);
-      expect(userJwt).toBeDefined();
-
-      Logger.log('API', 'INFO', `Unlinking user device using basic user's own JWT...`);
-      const unlinkRes = await adminApis.unlinkUserDevice(testUser, userJwt!);
-      expect(unlinkRes.status).toBe(200);
-      expect(unlinkRes.data.message).toBeDefined();
     });
   });
 
@@ -342,7 +335,7 @@ test.describe('Authentication Journey - Login with Push', () => {
 });
 
 test.describe('Authentication Journey - Login with QR Code', () => {
-  test('TC05 - Create login with QR code auth journey via Rules Engine and verify login success', async ({ rulesApi, adminApis, userMgmtApi, loginPage, runtimeConfig, page }: AuthJourneyFixtures) => {
+  test('TC05 - Create login with QR code auth journey via Rules Engine and verify login success', async ({ rulesApi, adminApis, userMgmtApi, loginPage, runtimeConfig, page, homePage }: AuthJourneyFixtures) => {
     const randomUser = sharedUsers[Math.floor(Math.random() * sharedUsers.length)];
     const testUser = randomUser.username;
     let accessCode: string, sessionData: any, userInfo: any;
@@ -410,18 +403,9 @@ test.describe('Authentication Journey - Login with QR Code', () => {
       expect(sessionData).toBeDefined();
       Logger.log('SUCCESS', `QR session authentication successful.`);
       await loginPage.verifyLoginSuccess('User');
+      await homePage.navigateToLoginoptionsTab();
+      await homePage.deleteLinkedDevice();
       await loginPage.logout(testUser);
-    });
-
-    await test.step('Step 7: API - Unlink user device', async () => {
-      const communityId = runtimeConfig.communityId;
-      const userJwt = await page.evaluate((cid) => window.localStorage.getItem(`${cid}_token`), communityId);
-      expect(userJwt).toBeDefined();
-
-      Logger.log('API', 'INFO', `Unlinking user device using basic user's own JWT...`);
-      const unlinkRes = await adminApis.unlinkUserDevice(testUser, userJwt!);
-      expect(unlinkRes.status).toBe(200);
-      expect(unlinkRes.data.message).toBeDefined();
     });
   });
 
